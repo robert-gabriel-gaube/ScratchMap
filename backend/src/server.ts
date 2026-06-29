@@ -2,20 +2,10 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import jwt from "jsonwebtoken";
+import { Prisma } from "@prisma/client";
+import { prisma } from "./db/prisma";
 
 dotenv.config();
-
-type VisitedCity = {
-  id: string;
-  cityName: string;
-  country: string;
-  latitude: number;
-  longitude: number;
-  boundaryGeojson?: unknown;
-  visitedAt?: string;
-  notes?: string;
-  createdAt: string;
-};
 
 type NominatimResult = {
   lat: string;
@@ -35,14 +25,6 @@ const APP_CONTACT = process.env.APP_CONTACT || "your-email@example.com";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const JWT_SECRET = process.env.JWT_SECRET;
 
-if (!ADMIN_PASSWORD) {
-  console.warn("WARNING: ADMIN_PASSWORD is not set.");
-}
-
-if (!JWT_SECRET) {
-  console.warn("WARNING: JWT_SECRET is not set.");
-}
-
 app.use(
   cors({
     origin(origin, callback) {
@@ -57,26 +39,9 @@ app.use(
   })
 );
 
-app.use(express.json({ limit: "8mb" }));
-
-let visitedCities: VisitedCity[] = [
-  {
-    id: "1",
-    cityName: "Timișoara",
-    country: "Romania",
-    latitude: 45.7489,
-    longitude: 21.2087,
-    visitedAt: "2026-06-29",
-    notes: "Home base.",
-    createdAt: new Date().toISOString(),
-  },
-];
+app.use(express.json({ limit: "12mb" }));
 
 const geocodeCache = new Map<string, NominatimResult>();
-
-function createId() {
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
 
 function normalizeKey(cityName: string, country: string) {
   return `${cityName.trim().toLowerCase()}|${country.trim().toLowerCase()}`;
@@ -87,15 +52,9 @@ function createAdminToken() {
     throw new Error("JWT_SECRET is not configured");
   }
 
-  return jwt.sign(
-    {
-      role: "admin",
-    },
-    JWT_SECRET,
-    {
-      expiresIn: "30d",
-    }
-  );
+  return jwt.sign({ role: "admin" }, JWT_SECRET, {
+    expiresIn: "30d",
+  });
 }
 
 function requireAdmin(
@@ -119,7 +78,6 @@ function requireAdmin(
     }
 
     const token = authHeader.replace("Bearer ", "");
-
     const payload = jwt.verify(token, JWT_SECRET) as { role?: string };
 
     if (payload.role !== "admin") {
@@ -136,23 +94,57 @@ function requireAdmin(
   }
 }
 
+function getSpecialSearchQuery(cityName: string, country: string) {
+  const normalizedCity = cityName
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+
+  const normalizedCountry = country
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+
+  if (
+    normalizedCity === "jeju" &&
+    (normalizedCountry === "south korea" ||
+      normalizedCountry === "korea" ||
+      normalizedCountry === "republic of korea")
+  ) {
+    return "Jeju Island, South Korea";
+  }
+
+  return null;
+}
+
 async function geocodeCity(cityName: string, country: string) {
   const cacheKey = normalizeKey(cityName, country);
-
   const cached = geocodeCache.get(cacheKey);
 
   if (cached) {
     return cached;
   }
 
-  const params = new URLSearchParams({
-    format: "jsonv2",
-    city: cityName,
-    country,
-    limit: "1",
-    polygon_geojson: "1",
-    addressdetails: "1",
-  });
+  const specialSearchQuery = getSpecialSearchQuery(cityName, country);
+
+  const params = specialSearchQuery
+    ? new URLSearchParams({
+        format: "jsonv2",
+        q: specialSearchQuery,
+        limit: "1",
+        polygon_geojson: "1",
+        addressdetails: "1",
+      })
+    : new URLSearchParams({
+        format: "jsonv2",
+        city: cityName,
+        country,
+        limit: "1",
+        polygon_geojson: "1",
+        addressdetails: "1",
+      });
 
   const url = `https://nominatim.openstreetmap.org/search?${params.toString()}`;
 
@@ -174,15 +166,29 @@ async function geocodeCity(cityName: string, country: string) {
   }
 
   const bestResult = results[0];
-
   geocodeCache.set(cacheKey, bestResult);
 
   return bestResult;
 }
 
+function parseVisitedAt(value: unknown) {
+  if (!value || typeof value !== "string") {
+    return null;
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return date;
+}
+
 app.get("/api/health", (_req, res) => {
   res.json({
     status: "ok",
+    storage: "postgres",
     message: "Travel Scratch Map backend is running",
   });
 });
@@ -224,8 +230,22 @@ app.get("/api/admin/status", requireAdmin, (_req, res) => {
   });
 });
 
-app.get("/api/visited-cities", (_req, res) => {
-  res.json(visitedCities);
+app.get("/api/visited-cities", async (_req, res) => {
+  try {
+    const cities = await prisma.visitedCity.findMany({
+      orderBy: {
+        createdAt: "asc",
+      },
+    });
+
+    res.json(cities);
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      error: "Could not load visited cities",
+    });
+  }
 });
 
 app.post("/api/visited-cities", requireAdmin, async (req, res) => {
@@ -238,11 +258,18 @@ app.post("/api/visited-cities", requireAdmin, async (req, res) => {
       });
     }
 
-    const alreadyExists = visitedCities.some(
-      (city) =>
-        normalizeKey(city.cityName, city.country) ===
-        normalizeKey(cityName, country)
-    );
+    const alreadyExists = await prisma.visitedCity.findFirst({
+      where: {
+        cityName: {
+          equals: cityName,
+          mode: "insensitive",
+        },
+        country: {
+          equals: country,
+          mode: "insensitive",
+        },
+      },
+    });
 
     if (alreadyExists) {
       return res.status(409).json({
@@ -261,19 +288,20 @@ app.post("/api/visited-cities", requireAdmin, async (req, res) => {
       });
     }
 
-    const newCity: VisitedCity = {
-      id: createId(),
-      cityName,
-      country,
-      latitude,
-      longitude,
-      boundaryGeojson: geocodedCity.geojson,
-      visitedAt,
-      notes,
-      createdAt: new Date().toISOString(),
-    };
-
-    visitedCities.push(newCity);
+    const newCity = await prisma.visitedCity.create({
+      data: {
+        cityName,
+        country,
+        latitude,
+        longitude,
+        boundaryGeojson:
+          geocodedCity.geojson === undefined
+            ? undefined
+            : (geocodedCity.geojson as Prisma.InputJsonValue),
+        visitedAt: parseVisitedAt(visitedAt),
+        notes: notes || null,
+      },
+    });
 
     res.status(201).json(newCity);
   } catch (error) {
@@ -288,20 +316,24 @@ app.post("/api/visited-cities", requireAdmin, async (req, res) => {
   }
 });
 
-app.delete("/api/visited-cities/:id", requireAdmin, (req, res) => {
-  const { id } = req.params;
+app.delete("/api/visited-cities/:id", requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
 
-  const cityExists = visitedCities.some((city) => city.id === id);
+    await prisma.visitedCity.delete({
+      where: {
+        id,
+      },
+    });
 
-  if (!cityExists) {
-    return res.status(404).json({
+    res.status(204).send();
+  } catch (error) {
+    console.error(error);
+
+    res.status(404).json({
       error: "City not found",
     });
   }
-
-  visitedCities = visitedCities.filter((city) => city.id !== id);
-
-  res.status(204).send();
 });
 
 app.listen(PORT, () => {
