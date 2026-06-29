@@ -284,6 +284,34 @@ textarea {
   margin-top: 0.3rem !important;
 }
 
+.admin-form {
+  margin-top: 1rem;
+}
+
+.muted {
+  margin: 0;
+  color: #d1d5db;
+  line-height: 1.5;
+}
+
+.admin-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.admin-badge {
+  margin: 0;
+  width: fit-content;
+  border-radius: 999px;
+  padding: 0.35rem 0.75rem;
+  background: rgba(34, 197, 94, 0.18);
+  color: #bbf7d0;
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  font-weight: 900;
+}
+
 @media (max-width: 700px) {
   .top-bar {
     align-items: center;

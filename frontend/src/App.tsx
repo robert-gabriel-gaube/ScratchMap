@@ -14,6 +14,7 @@ type VisitedCity = {
 };
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
+const ADMIN_TOKEN_STORAGE_KEY = "scratch-map-admin-token";
 
 function App() {
   const [cities, setCities] = useState<VisitedCity[]>([]);
@@ -21,10 +22,17 @@ function App() {
   const [country, setCountry] = useState("Germany");
   const [visitedAt, setVisitedAt] = useState("2026-06-29");
   const [notes, setNotes] = useState("");
+  const [adminPassword, setAdminPassword] = useState("");
+  const [adminToken, setAdminToken] = useState(
+    localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || ""
+  );
   const [isLoading, setIsLoading] = useState(false);
   const [isAddingCity, setIsAddingCity] = useState(false);
+  const [isUnlocking, setIsUnlocking] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [isPanelOpen, setIsPanelOpen] = useState(true);
+
+  const isAdmin = Boolean(adminToken);
 
   async function loadCities() {
     try {
@@ -51,6 +59,48 @@ function App() {
     loadCities();
   }, []);
 
+  async function handleUnlockAdmin(event: React.FormEvent) {
+    event.preventDefault();
+
+    try {
+      setIsUnlocking(true);
+      setErrorMessage("");
+
+      const response = await fetch(`${API_URL}/api/admin/unlock`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          password: adminPassword,
+        }),
+      });
+
+      const responseBody = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(responseBody?.error || "Could not unlock admin mode");
+      }
+
+      localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, responseBody.token);
+      setAdminToken(responseBody.token);
+      setAdminPassword("");
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Could not unlock admin mode."
+      );
+      console.error(error);
+    } finally {
+      setIsUnlocking(false);
+    }
+  }
+
+  function handleLogoutAdmin() {
+    localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+    setAdminToken("");
+    setAdminPassword("");
+  }
+
   async function handleAddCity(event: React.FormEvent) {
     event.preventDefault();
 
@@ -62,6 +112,7 @@ function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Authorization: `Bearer ${adminToken}`,
         },
         body: JSON.stringify({
           cityName,
@@ -99,15 +150,22 @@ function App() {
 
       const response = await fetch(`${API_URL}/api/visited-cities/${id}`, {
         method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+        },
       });
 
+      const responseBody = await response.json().catch(() => null);
+
       if (!response.ok) {
-        throw new Error("Failed to delete city");
+        throw new Error(responseBody?.error || "Failed to delete city");
       }
 
       await loadCities();
     } catch (error) {
-      setErrorMessage("Could not delete city.");
+      setErrorMessage(
+        error instanceof Error ? error.message : "Could not delete city."
+      );
       console.error(error);
     }
   }
@@ -126,73 +184,113 @@ function App() {
           className="panel-toggle"
           onClick={() => setIsPanelOpen((current) => !current)}
         >
-          {isPanelOpen ? "Hide panel" : "Add city"}
+          {isPanelOpen ? "Hide panel" : "Open panel"}
         </button>
       </div>
 
       {isPanelOpen && (
         <aside className="floating-panel">
-          <form className="form" onSubmit={handleAddCity}>
-            <div className="panel-header">
-              <div>
-                <h2>Add visited city</h2>
-                <p>{cities.length} cities marked</p>
-              </div>
-
-              <button
-                type="button"
-                className="icon-button"
-                onClick={() => setIsPanelOpen(false)}
-                aria-label="Close panel"
-              >
-                ×
-              </button>
+          <div className="panel-header">
+            <div>
+              <h2>{isAdmin ? "Admin mode" : "Public view"}</h2>
+              <p>{cities.length} cities marked</p>
             </div>
 
-            <label>
-              City
-              <input
-                value={cityName}
-                onChange={(event) => setCityName(event.target.value)}
-                placeholder="Berlin"
-                required
-              />
-            </label>
-
-            <label>
-              Country
-              <input
-                value={country}
-                onChange={(event) => setCountry(event.target.value)}
-                placeholder="Germany"
-                required
-              />
-            </label>
-
-            <label>
-              Visited date
-              <input
-                type="date"
-                value={visitedAt}
-                onChange={(event) => setVisitedAt(event.target.value)}
-              />
-            </label>
-
-            <label>
-              Notes
-              <textarea
-                value={notes}
-                onChange={(event) => setNotes(event.target.value)}
-                placeholder="What happened there?"
-              />
-            </label>
-
-            <button type="submit" disabled={isAddingCity}>
-              {isAddingCity ? "Finding city..." : "Mark as visited"}
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => setIsPanelOpen(false)}
+              aria-label="Close panel"
+            >
+              ×
             </button>
+          </div>
 
-            {errorMessage && <p className="error">{errorMessage}</p>}
-          </form>
+          {!isAdmin && (
+            <form className="form admin-form" onSubmit={handleUnlockAdmin}>
+              <p className="muted">
+                Anyone can view the map. Enter the admin password to add or
+                delete cities.
+              </p>
+
+              <label>
+                Admin password
+                <input
+                  type="password"
+                  value={adminPassword}
+                  onChange={(event) => setAdminPassword(event.target.value)}
+                  placeholder="Password"
+                  required
+                />
+              </label>
+
+              <button type="submit" disabled={isUnlocking}>
+                {isUnlocking ? "Unlocking..." : "Unlock admin"}
+              </button>
+            </form>
+          )}
+
+          {isAdmin && (
+            <>
+              <form className="form" onSubmit={handleAddCity}>
+                <div className="admin-actions">
+                  <p className="admin-badge">Unlocked</p>
+
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={handleLogoutAdmin}
+                  >
+                    Lock
+                  </button>
+                </div>
+
+                <label>
+                  City
+                  <input
+                    value={cityName}
+                    onChange={(event) => setCityName(event.target.value)}
+                    placeholder="Berlin"
+                    required
+                  />
+                </label>
+
+                <label>
+                  Country
+                  <input
+                    value={country}
+                    onChange={(event) => setCountry(event.target.value)}
+                    placeholder="Germany"
+                    required
+                  />
+                </label>
+
+                <label>
+                  Visited date
+                  <input
+                    type="date"
+                    value={visitedAt}
+                    onChange={(event) => setVisitedAt(event.target.value)}
+                  />
+                </label>
+
+                <label>
+                  Notes
+                  <textarea
+                    value={notes}
+                    onChange={(event) => setNotes(event.target.value)}
+                    placeholder="What happened there?"
+                  />
+                </label>
+
+                <button type="submit" disabled={isAddingCity}>
+                  {isAddingCity ? "Finding city..." : "Mark as visited"}
+                </button>
+              </form>
+            </>
+          )}
+
+          {errorMessage && <p className="error">{errorMessage}</p>}
 
           <section className="visited-section">
             <div className="list-header">
@@ -219,12 +317,14 @@ function App() {
                     {city.notes && <p className="notes">{city.notes}</p>}
                   </div>
 
-                  <button
-                    className="danger"
-                    onClick={() => handleDeleteCity(city.id)}
-                  >
-                    Delete
-                  </button>
+                  {isAdmin && (
+                    <button
+                      className="danger"
+                      onClick={() => handleDeleteCity(city.id)}
+                    >
+                      Delete
+                    </button>
+                  )}
                 </article>
               ))}
             </div>
